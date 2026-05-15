@@ -1,0 +1,50 @@
+# Plugin manifest consumed by butter-agent at startup.
+#
+# Required keys:
+# - [plugin].name: stable identifier the agent uses to reference this
+#   plugin in task plans. Must be unique across loaded plugins. It is also
+#   the namespace core prefixes onto every `database.*` table this plugin
+#   touches (`notes__<table>`) — invariant #6, applied in core, not here.
+# - [plugin].version: semver string for diagnostics and version pinning.
+# - [plugin].entrypoint: `module:Class` import path resolving to a class
+#   implementing the `Plugin` Protocol (`butter_agent.plugin_api.Plugin`).
+# - [plugin].blast_radius: one of "read-only", "local-write", "network".
+#   The host's `core.max_blast_radius` rejects anything broader. Notes
+#   writes to local storage (via the shared database plugin) so it is
+#   "local-write".
+# - [plugin].requires: the fully-qualified `internal` capabilities this
+#   plugin invokes via PluginContext.call. The host's registry builder
+#   rejects a call to anything not listed here, validates each resolves to
+#   an internal=true capability, and that the declared blast_radius covers
+#   the transitive radius reached through requires.
+# - [[capability]]: at least one entry. Each declares a name, a
+#   one-sentence description (surfaced to the model), and JSON-schema-ish
+#   input/output shapes. Only keys in input_schema are *required* by the
+#   task executor — optional inputs (e.g. `created_at`, `limit`) are
+#   accepted but deliberately omitted from the schema so they stay
+#   optional.
+
+[plugin]
+name = "notes"
+version = "0.1.0"
+entrypoint = "butter_plugin_notes:NotesPlugin"
+blast_radius = "local-write"
+requires = ["database.define_table", "database.insert", "database.select"]
+
+[[capability]]
+name = "create"
+description = "Save a free-form note to local storage. `content` is the note body. Optionally accepts `created_at`, an ISO-8601 timestamp (e.g. chained from `clock.now`); when omitted the current time is recorded automatically."
+input_schema = { content = "string" }
+output_schema = { note_id = "integer", created_at = "string" }
+
+[[capability]]
+name = "list"
+description = "List saved notes oldest-first. Optional `limit` caps how many are returned."
+input_schema = {}
+output_schema = { notes = "array" }
+
+[[capability]]
+name = "read"
+description = "Read one saved note by its `note_id` (as returned by notes.create or notes.list)."
+input_schema = { note_id = "integer" }
+output_schema = { content = "string", created_at = "string" }
