@@ -211,6 +211,104 @@ async def test_read_surfaces_incomplete_row_as_descriptive_error() -> None:
         await plugin.execute('read', {'note_id': 3}, ctx)
 
 
+# --- delete ------------------------------------------------------------------
+
+
+async def test_delete_removes_note_by_id() -> None:
+    plugin = NotesPlugin()
+    ctx = _ctx({'database.delete': {'deleted': 1}})
+
+    result = await plugin.execute('delete', {'note_id': 4}, ctx)
+
+    assert result == {'note_id': 4}
+    assert ('database.delete', {'table': _BARE, 'where': {'id': 4}}) in ctx.calls
+
+
+async def test_delete_unknown_id_raises() -> None:
+    """deleted == 0 means the id never existed — same stance as read."""
+    plugin = NotesPlugin()
+    ctx = _ctx({'database.delete': {'deleted': 0}})
+    with pytest.raises(NotesPluginError, match='no note with id 99'):
+        await plugin.execute('delete', {'note_id': 99}, ctx)
+
+
+@pytest.mark.parametrize('bad', ['4', None, True])
+async def test_delete_rejects_non_integer_note_id(bad: object) -> None:
+    plugin = NotesPlugin()
+    with pytest.raises(NotesPluginError, match="'note_id' must be an integer"):
+        await plugin.execute('delete', {'note_id': bad}, _ctx())
+
+
+async def test_delete_surfaces_non_integer_count_from_store() -> None:
+    plugin = NotesPlugin()
+    ctx = _ctx({'database.delete': {'deleted': 'oops'}})
+    with pytest.raises(NotesPluginError, match='non-integer count'):
+        await plugin.execute('delete', {'note_id': 1}, ctx)
+
+
+# --- search ------------------------------------------------------------------
+
+
+def _rows() -> list[dict[str, object]]:
+    return [
+        {'id': 1, 'content': 'buy butter', 'created_at': '2026-05-14T10:00:00+00:00'},
+        {'id': 2, 'content': 'call Rick', 'created_at': '2026-05-14T11:00:00+00:00'},
+        {'id': 3, 'content': 'Butter run again', 'created_at': '2026-05-14T12:00:00+00:00'},
+    ]
+
+
+async def test_search_matches_case_insensitive_substring_oldest_first() -> None:
+    plugin = NotesPlugin()
+    ctx = _ctx({'database.select': {'rows': _rows()}})
+
+    result = await plugin.execute('search', {'query': 'butter'}, ctx)
+
+    assert result == {'notes': [_rows()[0], _rows()[2]]}
+    # Selects the full table oldest-first; the substring filter is in Python.
+    assert ('database.select', {'table': _BARE, 'order_by': 'id'}) in ctx.calls
+
+
+async def test_search_no_match_is_empty_not_an_error() -> None:
+    plugin = NotesPlugin()
+    ctx = _ctx({'database.select': {'rows': _rows()}})
+    assert await plugin.execute('search', {'query': 'zzz'}, ctx) == {'notes': []}
+
+
+async def test_search_limit_caps_matches() -> None:
+    plugin = NotesPlugin()
+    ctx = _ctx({'database.select': {'rows': _rows()}})
+    result = await plugin.execute('search', {'query': 'butter', 'limit': 1}, ctx)
+    assert result == {'notes': [_rows()[0]]}
+
+
+async def test_search_limit_zero_returns_no_matches() -> None:
+    plugin = NotesPlugin()
+    ctx = _ctx({'database.select': {'rows': _rows()}})
+    assert await plugin.execute('search', {'query': 'butter', 'limit': 0}, ctx) == {'notes': []}
+
+
+@pytest.mark.parametrize('bad', ['', None, 123])
+async def test_search_rejects_empty_or_non_string_query(bad: object) -> None:
+    plugin = NotesPlugin()
+    with pytest.raises(NotesPluginError, match="'query' must be a non-empty string"):
+        await plugin.execute('search', {'query': bad}, _ctx({'database.select': {'rows': []}}))
+
+
+@pytest.mark.parametrize('bad', [-1, True, 'lots'])
+async def test_search_rejects_invalid_limit(bad: object) -> None:
+    plugin = NotesPlugin()
+    with pytest.raises(NotesPluginError, match="'limit' must be a non-negative integer"):
+        await plugin.execute('search', {'query': 'x', 'limit': bad}, _ctx({'database.select': {'rows': []}}))
+
+
+async def test_search_surfaces_incomplete_row_as_descriptive_error() -> None:
+    """A scanned row missing `content` is a store contract break."""
+    plugin = NotesPlugin()
+    ctx = _ctx({'database.select': {'rows': [{'id': 1}]}})
+    with pytest.raises(NotesPluginError, match='incomplete row'):
+        await plugin.execute('search', {'query': 'x'}, ctx)
+
+
 # --- table lifecycle ---------------------------------------------------------
 
 
@@ -230,7 +328,7 @@ async def test_table_defined_exactly_once_across_calls() -> None:
 async def test_unknown_capability_raises() -> None:
     plugin = NotesPlugin()
     with pytest.raises(NotesPluginError, match='unknown capability'):
-        await plugin.execute('delete', {'note_id': 1}, _ctx())
+        await plugin.execute('purge', {'note_id': 1}, _ctx())
 
 
 # --- Manifest contract -------------------------------------------------------
@@ -241,7 +339,7 @@ def test_manifest_round_trips_through_butter_validator() -> None:
     assert manifest.name == 'notes'
     assert manifest.blast_radius is BlastRadius.LOCAL_WRITE
     assert manifest.entrypoint == 'butter_plugin_notes:NotesPlugin'
-    assert {cap.name for cap in manifest.capabilities} == {'create', 'list', 'read'}
+    assert {cap.name for cap in manifest.capabilities} == {'create', 'list', 'read', 'delete', 'search'}
     # User-facing: notes capabilities appear in the planner menu (unlike
     # the host's internal database.*).
     assert all(not cap.internal for cap in manifest.capabilities)
@@ -252,6 +350,7 @@ def test_manifest_round_trips_through_butter_validator() -> None:
         'database.define_table',
         'database.insert',
         'database.select',
+        'database.delete',
     )
 
 

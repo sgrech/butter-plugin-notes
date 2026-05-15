@@ -23,11 +23,13 @@ Three args after `self` — `capability, inputs, context`. The host's loader rej
 4. **Contract breaks surface as `NotesPluginError`.** A malformed `database.*` result (non-int id, non-mapping/incomplete row) raises a descriptive `NotesPluginError`, never a bare `KeyError`. The host records it as the step `failure_reason`; the loop still synthesises.
 5. **Manifest is the source of truth for shape.** Capability names/inputs/outputs and `requires` must round-trip through the host's `parse_manifest` (`tests/test_plugin.py::test_manifest_round_trips_through_butter_validator`).
 
-## Capability set (v1)
+## Capability set
 
 - `create(content, created_at?)` → `{note_id, created_at}` — gated `confirm` by the planner per step (the manifest carries no gate; gate is a plan concern enforced by the host's core).
 - `list(limit?)` → `{notes: [{id, content, created_at}]}` — oldest-first.
 - `read(note_id)` → `{content, created_at}` — raises on unknown id.
+- `delete(note_id)` → `{note_id}` — raises on unknown id (same stance as `read`); calls `database.delete`.
+- `search(query, limit?)` → `{notes: [{id, content, created_at}]}` — case-insensitive substring of `content`, oldest-first; `limit` caps matches. Filtered in Python (`database.select` `where` is equality-only).
 
 New capabilities follow the same shape: declare in `manifest.toml`, implement `_<name>(inputs, context)`, branch in `execute`, add tests covering happy path + at least one input-validation failure + (if it persists) the `database.*` call shape.
 
