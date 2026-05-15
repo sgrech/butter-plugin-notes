@@ -29,7 +29,7 @@ Three args after `self` — `capability, inputs, context`. The host's loader rej
 - `list(limit?)` → `{notes: [{id, content, created_at}]}` — oldest-first.
 - `read(note_id)` → `{content, created_at}` — raises on unknown id.
 - `delete(note_id)` → `{note_id}` — raises on unknown id (same stance as `read`); calls `database.delete`.
-- `search(query, limit?)` → `{notes: [{id, content, created_at}]}` — case-insensitive substring of `content`, oldest-first; `limit` caps matches. Filtered in Python (`database.select` `where` is equality-only).
+- `search(query, limit?)` → `{notes: [{id, content, created_at}]}` — full-text relevance search over `content` (porter-stemmed, prefix-matched, bm25 order), most-relevant-first; `limit` caps matches. Delegated to the host's `database.search` (FTS5); `_ensure_table` registers the index via `database.define_fts`.
 
 New capabilities follow the same shape: declare in `manifest.toml`, implement `_<name>(inputs, context)`, branch in `execute`, add tests covering happy path + at least one input-validation failure + (if it persists) the `database.*` call shape.
 

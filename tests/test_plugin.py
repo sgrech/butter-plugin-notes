@@ -66,12 +66,17 @@ class FakePluginContext:
 def _ctx(responses: Mapping[str, Mapping[str, object]] | None = None) -> FakePluginContext:
     """A fake context with canned `database.*` responses.
 
-    `define_table` is always stubbed because every capability ensures the
-    table first; callers add `insert` / `select` as needed. `responses`
-    is a `Mapping` (covariant) so call sites can pass dict literals with
-    narrower value types without tripping dict invariance.
+    `define_table` and `define_fts` are always stubbed because every
+    capability runs `_ensure_table`, which now establishes both the base
+    table and the content FTS index. Callers add `insert` / `select` /
+    `search` as needed. `responses` is a `Mapping` (covariant) so call
+    sites can pass dict literals with narrower value types without
+    tripping dict invariance.
     """
-    canned: dict[str, dict[str, object]] = {'database.define_table': {'table': f'notes__{_BARE}'}}
+    canned: dict[str, dict[str, object]] = {
+        'database.define_table': {'table': f'notes__{_BARE}'},
+        'database.define_fts': {'table': f'notes__{_BARE}'},
+    }
     if responses is not None:
         canned.update({ref: dict(value) for ref, value in responses.items()})
     return FakePluginContext(responses=canned)
@@ -94,6 +99,7 @@ async def test_create_uses_chained_created_at_verbatim() -> None:
     assert result == {'note_id': 7, 'created_at': '2026-05-14T15:00:00+02:00'}
     assert ctx.calls == [
         ('database.define_table', {'table': _BARE, 'columns': _COLUMNS}),
+        ('database.define_fts', {'table': _BARE, 'columns': ['content']}),
         (
             'database.insert',
             {'table': _BARE, 'row': {'content': 'buy butter', 'created_at': '2026-05-14T15:00:00+02:00'}},
@@ -249,92 +255,92 @@ async def test_delete_surfaces_non_integer_count_from_store() -> None:
 # --- search ------------------------------------------------------------------
 
 
-def _rows() -> list[dict[str, object]]:
+def _hits() -> list[dict[str, object]]:
+    """Rows as the host's FTS-backed database.search would return them —
+    already relevance-ordered; notes does no reordering or filtering."""
     return [
-        {'id': 1, 'content': 'buy butter', 'created_at': '2026-05-14T10:00:00+00:00'},
-        {'id': 2, 'content': 'call Rick', 'created_at': '2026-05-14T11:00:00+00:00'},
         {'id': 3, 'content': 'Butter run again', 'created_at': '2026-05-14T12:00:00+00:00'},
+        {'id': 1, 'content': 'buy butter', 'created_at': '2026-05-14T10:00:00+00:00'},
     ]
 
 
-async def test_search_matches_case_insensitive_substring_oldest_first() -> None:
+async def test_search_delegates_to_database_search_passing_rows_through() -> None:
+    """notes.search is a thin pass-through over the host's FTS search.
+
+    It forwards `query` verbatim with `order='rank'` (relevance) and
+    returns the store's already-ordered rows untouched — no local
+    matching, scoring, or reordering.
+    """
     plugin = NotesPlugin()
-    ctx = _ctx({'database.select': {'rows': _rows()}})
+    ctx = _ctx({'database.search': {'rows': _hits()}})
 
     result = await plugin.execute('search', {'query': 'butter'}, ctx)
 
-    assert result == {'notes': [_rows()[0], _rows()[2]]}
-    # Selects the full table oldest-first; the substring filter is in Python.
-    assert ('database.select', {'table': _BARE, 'order_by': 'id'}) in ctx.calls
+    assert result == {'notes': _hits()}
+    assert ('database.search', {'table': _BARE, 'query': 'butter', 'order': 'rank'}) in ctx.calls
 
 
-async def test_search_no_match_is_empty_not_an_error() -> None:
+async def test_search_forwards_limit_when_given() -> None:
     plugin = NotesPlugin()
-    ctx = _ctx({'database.select': {'rows': _rows()}})
-    assert await plugin.execute('search', {'query': 'zzz'}, ctx) == {'notes': []}
+    ctx = _ctx({'database.search': {'rows': []}})
+    await plugin.execute('search', {'query': 'butter', 'limit': 5}, ctx)
+    search_call = next(c for c in ctx.calls if c[0] == 'database.search')
+    assert search_call[1] == {'table': _BARE, 'query': 'butter', 'order': 'rank', 'limit': 5}
 
 
-async def test_search_limit_caps_matches() -> None:
+async def test_search_omits_limit_key_when_absent() -> None:
+    """No `limit` => the request carries no `limit` key (store decides)."""
     plugin = NotesPlugin()
-    ctx = _ctx({'database.select': {'rows': _rows()}})
-    result = await plugin.execute('search', {'query': 'butter', 'limit': 1}, ctx)
-    assert result == {'notes': [_rows()[0]]}
+    ctx = _ctx({'database.search': {'rows': []}})
+    await plugin.execute('search', {'query': 'butter'}, ctx)
+    search_call = next(c for c in ctx.calls if c[0] == 'database.search')
+    assert 'limit' not in search_call[1]
 
 
-async def test_search_limit_zero_returns_no_matches() -> None:
+async def test_search_no_hits_is_empty_not_an_error() -> None:
     plugin = NotesPlugin()
-    ctx = _ctx({'database.select': {'rows': _rows()}})
-    assert await plugin.execute('search', {'query': 'butter', 'limit': 0}, ctx) == {'notes': []}
+    ctx = _ctx({'database.search': {'rows': []}})
+    assert await plugin.execute('search', {'query': 'nothing'}, ctx) == {'notes': []}
 
 
 @pytest.mark.parametrize('bad', ['', None, 123])
 async def test_search_rejects_empty_or_non_string_query(bad: object) -> None:
     plugin = NotesPlugin()
     with pytest.raises(NotesPluginError, match="'query' must be a non-empty string"):
-        await plugin.execute('search', {'query': bad}, _ctx({'database.select': {'rows': []}}))
+        await plugin.execute('search', {'query': bad}, _ctx())
 
 
 @pytest.mark.parametrize('bad', [-1, True, 'lots'])
 async def test_search_rejects_invalid_limit(bad: object) -> None:
     plugin = NotesPlugin()
     with pytest.raises(NotesPluginError, match="'limit' must be a non-negative integer"):
-        await plugin.execute('search', {'query': 'x', 'limit': bad}, _ctx({'database.select': {'rows': []}}))
+        await plugin.execute('search', {'query': 'x', 'limit': bad}, _ctx())
 
 
-async def test_search_surfaces_incomplete_row_as_descriptive_error() -> None:
-    """A scanned row missing `content` is a store contract break."""
+async def test_search_surfaces_non_list_rows_as_contract_break() -> None:
+    """A malformed database.search result is surfaced, not returned blindly
+    (same stance as _list's rows handling)."""
     plugin = NotesPlugin()
-    ctx = _ctx({'database.select': {'rows': [{'id': 1}]}})
-    with pytest.raises(NotesPluginError, match='incomplete row'):
+    ctx = _ctx({'database.search': {'rows': 'oops'}})
+    with pytest.raises(NotesPluginError, match='non-list rows'):
         await plugin.execute('search', {'query': 'x'}, ctx)
-
-
-async def test_search_matched_row_missing_created_at_is_a_contract_break() -> None:
-    """A row that matches but lacks `created_at` is incomplete.
-
-    The returned note shape is {id, content, created_at}; surfacing only
-    `content` would emit a malformed note instead of the same
-    contract-break _read raises (PR #1 review)."""
-    plugin = NotesPlugin()
-    ctx = _ctx({'database.select': {'rows': [{'id': 1, 'content': 'has butter'}]}})
-    with pytest.raises(NotesPluginError, match='incomplete row'):
-        await plugin.execute('search', {'query': 'butter'}, ctx)
 
 
 # --- table lifecycle ---------------------------------------------------------
 
 
-async def test_table_defined_exactly_once_across_calls() -> None:
-    """`define_table` is asserted once per process, not per operation."""
+async def test_table_and_fts_defined_exactly_once_across_calls() -> None:
+    """`define_table` and `define_fts` each run once per process, not per
+    operation — the FTS index is set up alongside the table, once."""
     plugin = NotesPlugin()
-    ctx = _ctx({'database.insert': {'id': 1}, 'database.select': {'rows': []}})
+    ctx = _ctx({'database.insert': {'id': 1}, 'database.search': {'rows': []}})
 
     await plugin.execute('create', {'content': 'one'}, ctx)
-    await plugin.execute('list', {}, ctx)
+    await plugin.execute('search', {'query': 'one'}, ctx)
     await plugin.execute('create', {'content': 'two'}, ctx)
 
-    define_calls = [c for c in ctx.calls if c[0] == 'database.define_table']
-    assert len(define_calls) == 1
+    assert len([c for c in ctx.calls if c[0] == 'database.define_table']) == 1
+    assert len([c for c in ctx.calls if c[0] == 'database.define_fts']) == 1
 
 
 async def test_unknown_capability_raises() -> None:
@@ -363,6 +369,8 @@ def test_manifest_round_trips_through_butter_validator() -> None:
         'database.insert',
         'database.select',
         'database.delete',
+        'database.define_fts',
+        'database.search',
     )
 
 

@@ -27,9 +27,11 @@ contract, not a notes concern — see butter-agent
   `clock.now → notes.create`, else self-generated). `datetime` columns
   are stored as ISO-8601 TEXT.
 - `database.select`'s `where` is equality-only AND; reads here only ever
-  filter by the surrogate `id`. `notes.search` therefore cannot push its
-  substring predicate into the store — it selects the full table
-  oldest-first and matches `content` in Python.
+  filter by the surrogate `id`. `notes.search` does NOT use `select` —
+  it delegates to the host's FTS5-backed `database.search` (porter
+  stemming, prefix terms, bm25 relevance). The plugin owns no matching
+  logic; `database.define_fts` (called in `_ensure_table`) sets up the
+  content index and the host's triggers keep it live.
 - `database.delete`'s `where` is the same equality-only AND, required and
   non-empty (a predicate-less DELETE would wipe the namespace); `notes.delete`
   only ever deletes by the surrogate `id`.
@@ -110,7 +112,14 @@ class NotesPlugin:
         )
 
     async def _ensure_table(self, context: PluginContext) -> None:
-        """Create the notes table on first use, exactly once per process."""
+        """Create the notes table + content FTS index, once per process.
+
+        `define_fts` is established here (not lazily in `_search`) so the
+        host's sync triggers are live before the first `create` — every
+        note is indexed as it is written, not only those present at the
+        first search. Both calls are idempotent; the host's `define_fts`
+        requires the base table first, hence the strict order.
+        """
         if self._table_ready:
             return
         async with self._table_lock:
@@ -119,6 +128,10 @@ class NotesPlugin:
             await context.call(
                 'database.define_table',
                 {'table': _TABLE, 'columns': _COLUMNS},
+            )
+            await context.call(
+                'database.define_fts',
+                {'table': _TABLE, 'columns': ['content']},
             )
             self._table_ready = True
 
@@ -223,40 +236,23 @@ class NotesPlugin:
             raise NotesPluginError(f"input 'limit' must be a non-negative integer, got {limit!r}")
 
         await self._ensure_table(context)
-        # `database.select`'s `where` is equality-only — no substring
-        # operator — so the match runs here over the full oldest-first
-        # row set rather than being pushed into the store. `limit` caps
-        # the number of *matches* returned (not rows scanned), so it is
-        # applied after filtering, not forwarded to database.select.
-        result = await context.call('database.select', {'table': _TABLE, 'order_by': 'id'})
+        # Matching is delegated to the host's FTS5-backed
+        # `database.search` (porter-stemmed prefix terms, bm25
+        # relevance) rather than a local substring scan. `order='rank'`
+        # => most-relevant first; the store builds the injection-safe
+        # MATCH expression from `query` treated as natural text. `limit`
+        # caps matches at the store, not here.
+        request: dict[str, object] = {'table': _TABLE, 'query': query, 'order': 'rank'}
+        if limit is not None:
+            request['limit'] = limit
+        result = await context.call('database.search', request)
         rows = result.get('rows')
         if not isinstance(rows, list):
-            # database.select's contract is {rows: [...]}; anything else
-            # is a store contract break, surfaced rather than iterated
-            # blindly (same stance as _read's rows check).
-            raise NotesPluginError(f'database.select returned a non-list rows {rows!r}')
-        needle = query.lower()
-        matches: list[object] = []
-        for row in rows:
-            if limit is not None and len(matches) >= limit:
-                break
-            if not isinstance(row, dict):
-                # Same store-contract-break stance as _read: a non-mapping
-                # row is surfaced descriptively, not indexed blindly.
-                raise NotesPluginError(f'database.select returned a non-mapping row {row!r}')
-            content = row.get('content')
-            if not isinstance(content, str):
-                raise NotesPluginError(f'database.select returned an incomplete row {row!r}')
-            if needle in content.lower():
-                if not isinstance(row.get('created_at'), str):
-                    # A row we are about to *return* is missing its own
-                    # columns. Surface the same incomplete-row contract
-                    # break _read raises — the documented note shape is
-                    # {id, content, created_at}, so a matched row without
-                    # created_at is a store contract break, not a result.
-                    raise NotesPluginError(f'database.select returned an incomplete row {row!r}')
-                matches.append(row)
-        return {'notes': matches}
+            # database.search's contract is {rows: [...]}; anything else
+            # is a store contract break, surfaced rather than returned
+            # blindly (same stance as _list's rows handling).
+            raise NotesPluginError(f'database.search returned a non-list rows {rows!r}')
+        return {'notes': rows}
 
 
 def _resolve_created_at(value: object) -> str:
