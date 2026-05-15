@@ -248,6 +248,13 @@ class NotesPlugin:
             if not isinstance(content, str):
                 raise NotesPluginError(f'database.select returned an incomplete row {row!r}')
             if needle in content.lower():
+                if not isinstance(row.get('created_at'), str):
+                    # A row we are about to *return* is missing its own
+                    # columns. Surface the same incomplete-row contract
+                    # break _read raises — the documented note shape is
+                    # {id, content, created_at}, so a matched row without
+                    # created_at is a store contract break, not a result.
+                    raise NotesPluginError(f'database.select returned an incomplete row {row!r}')
                 matches.append(row)
         return {'notes': matches}
 

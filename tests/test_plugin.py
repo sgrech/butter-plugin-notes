@@ -309,6 +309,18 @@ async def test_search_surfaces_incomplete_row_as_descriptive_error() -> None:
         await plugin.execute('search', {'query': 'x'}, ctx)
 
 
+async def test_search_matched_row_missing_created_at_is_a_contract_break() -> None:
+    """A row that matches but lacks `created_at` is incomplete.
+
+    The returned note shape is {id, content, created_at}; surfacing only
+    `content` would emit a malformed note instead of the same
+    contract-break _read raises (PR #1 review)."""
+    plugin = NotesPlugin()
+    ctx = _ctx({'database.select': {'rows': [{'id': 1, 'content': 'has butter'}]}})
+    with pytest.raises(NotesPluginError, match='incomplete row'):
+        await plugin.execute('search', {'query': 'butter'}, ctx)
+
+
 # --- table lifecycle ---------------------------------------------------------
 
 

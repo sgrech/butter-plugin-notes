@@ -43,4 +43,4 @@ CI parity = `just check` green locally before pushing. No separate CI config.
 
 ## Versioning
 
-Semver. Bump `[plugin].version` in `manifest.toml` and `__version__` in `__init__.py` together. The host pins `[[plugin]] source = "...@vX.Y.Z"` against it.
+Semver. Three version sources must move together in one commit: `[plugin].version` in `manifest.toml`, `__version__` in `__init__.py`, and `[project].version` in `pyproject.toml`. (Manifest/`__version__` drive the host's plugin contract; `pyproject.toml` drives the built wheel/sdist — leaving it stale publishes a mislabelled artifact.) The host pins `[[plugin]] source = "...@vX.Y.Z"` against it.
