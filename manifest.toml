@@ -26,10 +26,10 @@
 
 [plugin]
 name = "notes"
-version = "0.2.0"
+version = "0.3.0"
 entrypoint = "butter_plugin_notes:NotesPlugin"
 blast_radius = "local-write"
-requires = ["database.define_table", "database.insert", "database.select", "database.delete"]
+requires = ["database.define_table", "database.insert", "database.select", "database.delete", "database.define_fts", "database.search"]
 
 [[capability]]
 name = "create"
@@ -57,6 +57,6 @@ output_schema = { note_id = "integer" }
 
 [[capability]]
 name = "search"
-description = "Find saved notes whose content contains `query` (case-insensitive substring match), oldest-first. Optional `limit` caps how many matches are returned."
+description = "Find saved notes by relevance to `query` — a full-text search over note content (word-stemmed, prefix-matched), most relevant first. Optional `limit` caps how many matches are returned."
 input_schema = { query = "string" }
 output_schema = { notes = "array" }

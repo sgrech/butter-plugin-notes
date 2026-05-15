@@ -12,9 +12,9 @@ This is the worked example a `local-write` plugin author copies: it declares `re
 | `list` | optional `limit` | `{notes: [{id, content, created_at}]}` | Oldest-first. |
 | `read` | `note_id` | `{content, created_at}` | Raises if the id is unknown. |
 | `delete` | `note_id` | `{note_id}` | Raises if the id is unknown (same stance as `read`). |
-| `search` | `query`, optional `limit` | `{notes: [{id, content, created_at}]}` | Case-insensitive substring of `content`, oldest-first. `limit` caps matches. Matched in Python — `database.select`'s `where` is equality-only. |
+| `search` | `query`, optional `limit` | `{notes: [{id, content, created_at}]}` | Full-text relevance search over `content` (word-stemmed, prefix-matched), **most-relevant-first**. `limit` caps matches. Delegated to the host's FTS5-backed `database.search`. |
 
-`blast_radius = "local-write"`. `requires = ["database.define_table", "database.insert", "database.select", "database.delete"]` — notes never touches SQL; the host's `database` plugin owns the file and core namespaces the table to `notes__entries` (the plugin only ever passes the bare name `entries`).
+`blast_radius = "local-write"`. `requires = ["database.define_table", "database.insert", "database.select", "database.delete", "database.define_fts", "database.search"]` — notes never touches SQL; the host's `database` plugin owns the file (and the FTS5 index) and core namespaces the table to `notes__entries` (the plugin only ever passes the bare name `entries`).
 
 ## Installing into a butter-agent host
 
