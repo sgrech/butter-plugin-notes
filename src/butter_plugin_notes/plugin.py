@@ -27,7 +27,12 @@ contract, not a notes concern — see butter-agent
   `clock.now → notes.create`, else self-generated). `datetime` columns
   are stored as ISO-8601 TEXT.
 - `database.select`'s `where` is equality-only AND; reads here only ever
-  filter by the surrogate `id`.
+  filter by the surrogate `id`. `notes.search` therefore cannot push its
+  substring predicate into the store — it selects the full table
+  oldest-first and matches `content` in Python.
+- `database.delete`'s `where` is the same equality-only AND, required and
+  non-empty (a predicate-less DELETE would wipe the namespace); `notes.delete`
+  only ever deletes by the surrogate `id`.
 """
 
 from __future__ import annotations
@@ -96,8 +101,12 @@ class NotesPlugin:
             return await self._list(inputs, context)
         if capability == 'read':
             return await self._read(inputs, context)
+        if capability == 'delete':
+            return await self._delete(inputs, context)
+        if capability == 'search':
+            return await self._search(inputs, context)
         raise NotesPluginError(
-            f'unknown capability {capability!r} (expected one of: create, list, read)',
+            f'unknown capability {capability!r} (expected one of: create, list, read, delete, search)',
         )
 
     async def _ensure_table(self, context: PluginContext) -> None:
@@ -180,6 +189,74 @@ class NotesPlugin:
             # `KeyError: 'content'` as the failure_reason).
             raise NotesPluginError(f'database.select returned an incomplete row {row!r}')
         return {'content': content, 'created_at': created_at}
+
+    async def _delete(self, inputs: dict[str, object], context: PluginContext) -> dict[str, object]:
+        note_id = inputs.get('note_id')
+        if not isinstance(note_id, int) or isinstance(note_id, bool):
+            raise NotesPluginError(f"input 'note_id' must be an integer, got {note_id!r}")
+
+        await self._ensure_table(context)
+        result = await context.call(
+            'database.delete',
+            {'table': _TABLE, 'where': {'id': note_id}},
+        )
+        deleted = result.get('deleted')
+        if not isinstance(deleted, int) or isinstance(deleted, bool):
+            # database.delete returns the affected row count; anything
+            # else is a store contract break, surfaced rather than
+            # silently reported as a successful delete (same stance as
+            # _create's id check).
+            raise NotesPluginError(f'database.delete returned a non-integer count {deleted!r}')
+        if deleted == 0:
+            # The caller asked to remove a specific note that does not
+            # exist — the same "asked for a missing id" condition _read
+            # raises on, not the empty-result case _list tolerates.
+            raise NotesPluginError(f'no note with id {note_id}')
+        return {'note_id': note_id}
+
+    async def _search(self, inputs: dict[str, object], context: PluginContext) -> dict[str, object]:
+        query = inputs.get('query')
+        if not isinstance(query, str) or not query:
+            raise NotesPluginError(f"input 'query' must be a non-empty string, got {query!r}")
+        limit = inputs.get('limit')
+        if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or limit < 0):
+            raise NotesPluginError(f"input 'limit' must be a non-negative integer, got {limit!r}")
+
+        await self._ensure_table(context)
+        # `database.select`'s `where` is equality-only — no substring
+        # operator — so the match runs here over the full oldest-first
+        # row set rather than being pushed into the store. `limit` caps
+        # the number of *matches* returned (not rows scanned), so it is
+        # applied after filtering, not forwarded to database.select.
+        result = await context.call('database.select', {'table': _TABLE, 'order_by': 'id'})
+        rows = result.get('rows')
+        if not isinstance(rows, list):
+            # database.select's contract is {rows: [...]}; anything else
+            # is a store contract break, surfaced rather than iterated
+            # blindly (same stance as _read's rows check).
+            raise NotesPluginError(f'database.select returned a non-list rows {rows!r}')
+        needle = query.lower()
+        matches: list[object] = []
+        for row in rows:
+            if limit is not None and len(matches) >= limit:
+                break
+            if not isinstance(row, dict):
+                # Same store-contract-break stance as _read: a non-mapping
+                # row is surfaced descriptively, not indexed blindly.
+                raise NotesPluginError(f'database.select returned a non-mapping row {row!r}')
+            content = row.get('content')
+            if not isinstance(content, str):
+                raise NotesPluginError(f'database.select returned an incomplete row {row!r}')
+            if needle in content.lower():
+                if not isinstance(row.get('created_at'), str):
+                    # A row we are about to *return* is missing its own
+                    # columns. Surface the same incomplete-row contract
+                    # break _read raises — the documented note shape is
+                    # {id, content, created_at}, so a matched row without
+                    # created_at is a store contract break, not a result.
+                    raise NotesPluginError(f'database.select returned an incomplete row {row!r}')
+                matches.append(row)
+        return {'notes': matches}
 
 
 def _resolve_created_at(value: object) -> str:

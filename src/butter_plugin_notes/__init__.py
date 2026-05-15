@@ -11,4 +11,4 @@ from __future__ import annotations
 from butter_plugin_notes.plugin import NotesPlugin, NotesPluginError
 
 __all__ = ['NotesPlugin', 'NotesPluginError']
-__version__ = '0.1.0'
+__version__ = '0.2.0'

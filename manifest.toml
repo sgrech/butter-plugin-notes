@@ -26,10 +26,10 @@
 
 [plugin]
 name = "notes"
-version = "0.1.0"
+version = "0.2.0"
 entrypoint = "butter_plugin_notes:NotesPlugin"
 blast_radius = "local-write"
-requires = ["database.define_table", "database.insert", "database.select"]
+requires = ["database.define_table", "database.insert", "database.select", "database.delete"]
 
 [[capability]]
 name = "create"
@@ -48,3 +48,15 @@ name = "read"
 description = "Read one saved note by its `note_id` (as returned by notes.create or notes.list)."
 input_schema = { note_id = "integer" }
 output_schema = { content = "string", created_at = "string" }
+
+[[capability]]
+name = "delete"
+description = "Delete one saved note by its `note_id` (as returned by notes.create or notes.list). Fails if no note has that id."
+input_schema = { note_id = "integer" }
+output_schema = { note_id = "integer" }
+
+[[capability]]
+name = "search"
+description = "Find saved notes whose content contains `query` (case-insensitive substring match), oldest-first. Optional `limit` caps how many matches are returned."
+input_schema = { query = "string" }
+output_schema = { notes = "array" }
